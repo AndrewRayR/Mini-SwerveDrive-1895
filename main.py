@@ -365,23 +365,88 @@ try:
 except Exception as e:
     print("I2C scan failed:", e)
 
-def load_html_page():
-    paths = ('web/index.html', '/web/index.html')
-    html = None
-    for p in paths:
+def get_mime_type(filename):
+    """Get MIME type based on file extension"""
+    if filename.endswith('.html'):
+        return 'text/html; charset=utf-8'
+    elif filename.endswith('.js'):
+        return 'application/javascript'
+    elif filename.endswith('.css'):
+        return 'text/css'
+    elif filename.endswith('.json'):
+        return 'application/json'
+    elif filename.endswith('.png'):
+        return 'image/png'
+    elif filename.endswith('.jpg') or filename.endswith('.jpeg'):
+        return 'image/jpeg'
+    elif filename.endswith('.gif'):
+        return 'image/gif'
+    elif filename.endswith('.svg'):
+        return 'image/svg+xml'
+    elif filename.endswith('.ico'):
+        return 'image/x-icon'
+    else:
+        return 'text/plain'
+
+def serve_static_file(path):
+    """Serve static files from the web directory"""
+    # Default to index.html for root path
+    if path == '/' or path == '':
+        path = '/index.html'
+    
+    # Remove leading slash if present
+    if path.startswith('/'):
+        path = path[1:]
+    
+    # Try different base paths
+    possible_paths = [
+        'web/' + path,
+        '/web/' + path,
+        path
+    ]
+    
+    content = None
+    file_path = None
+    is_binary = False
+    
+    # Determine if file should be read as binary
+    binary_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.ico']
+    is_binary = any(path.endswith(ext) for ext in binary_extensions)
+    
+    for p in possible_paths:
         try:
-            with open(p, 'r') as f:
-                html = f.read()
+            mode = 'rb' if is_binary else 'r'
+            with open(p, mode) as f:
+                content = f.read()
+                file_path = p
                 break
         except Exception:
-            pass
-    if html is None:
-        body = "<html><body><h3>Mini SwerveDrive</h3><p>UI file missing.</p></body></html>"
-        return "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" + body
-    # Inject runtime values
-    html = html.replace('__SSID__', AP_SSID)
-    html = html.replace('__PASSWORD__', AP_PASSWORD)
-    return "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" + html
+            continue
+    
+    if content is None:
+        # Return 404 for missing files
+        body = "<html><body><h3>404 Not Found</h3><p>File not found: {}</p></body></html>".format(path)
+        return "HTTP/1.0 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" + body
+    
+    # Get appropriate MIME type
+    mime_type = get_mime_type(path)
+    
+    # For HTML files, inject runtime values
+    if path.endswith('.html') and not is_binary:
+        content = content.replace('__SSID__', AP_SSID)
+        content = content.replace('__PASSWORD__', AP_PASSWORD)
+        response_content = content
+    else:
+        response_content = content
+    
+    # Build HTTP response
+    if is_binary:
+        # For binary files, we need to handle encoding differently
+        response_header = "HTTP/1.0 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n".format(mime_type, len(content))
+        return response_header.encode('utf-8') + content
+    else:
+        response_header = "HTTP/1.0 200 OK\r\nContent-Type: {}\r\n\r\n".format(mime_type)
+        return response_header + response_content
 
 def start_access_point():
     ap = network.WLAN(network.AP_IF)
@@ -503,7 +568,7 @@ def handle_websocket_client(client):
                 print("WebSocket receive error:", e)
                 break
             
-            time.sleep_ms(websocket_polling_delay)
+            time.sleep_ms(network_polling_delay)
     except Exception as e:
         print("WebSocket client error:", e)
     finally:
@@ -590,7 +655,13 @@ def http_server_thread():
             
             # Handle regular HTTP requests
             elif method == 'GET':
-                cl.send(load_html_page().encode('utf-8'))
+                response = serve_static_file(path)
+                if isinstance(response, bytes):
+                    # Binary response (e.g., images)
+                    cl.send(response)
+                else:
+                    # Text response
+                    cl.send(response.encode('utf-8'))
                 cl.close()
             else:
                 cl.send("HTTP/1.0 404 Not Found\r\n\r\n".encode())
@@ -602,7 +673,7 @@ def http_server_thread():
                 cl.close()
             except:
                 pass
-            time.sleep_ms(websocket_polling_delay)
+            time.sleep_ms(network_polling_delay)
 
 normal_drive_mode = True
 rotate_drive_mode = False
