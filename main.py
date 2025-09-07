@@ -1,4 +1,3 @@
-# main.py
 # Mini-SwerveDrive-1895 -- ESP32 MicroPython
 # - Hosts Wi-Fi AP + web joystick UI
 # - Uses L298N-style drivers (2 direction pins + 1 EN PWM per motor)
@@ -20,20 +19,6 @@ import machine
 from machine import Pin, ADC, PWM, I2C
 
 # ---------- PIN MAP (EDIT BEFORE USE) ----------
-# Clarification:
-# - "Steering motors" rotate each wheel assembly to change wheel heading (i.e., rotate wheels in place to point direction).
-#   These are the motors that physically change wheel angle; they are sometimes called "rotate" or "steer".
-# - "Drive motors" spin the wheels to move the robot forward/backward (i.e., actually move the robot).
-#
-# For each wheel we provide two groups:
-#   Drive motor tuple: (dirA_pin, dirB_pin, pwm_pin)   -> controls wheel spin (move robot)
-#   Steering motor tuple: (dirA_pin, dirB_pin, pwm_pin) -> controls wheel heading (rotate wheel assembly)
-#
-# Note: If your steering motors do not have a separate PWM pin (some setups use direction-only control),
-# set the pwm_pin to None. Likewise set ADC pins to None if you don't have wheel heading sensors.
-#
-# ADC1 pins (recommended) for wheel heading sensors (use ADC1 only while Wi-Fi active)
-# Map: FL_A, FL_B, FR_A, FR_B, BL_A, BL_B, BR_A, BR_B  (set None if not present)
 FL_HeadingSensor_A_pin = 32
 FL_HeadingSensor_B_pin = 33
 FR_HeadingSensor_A_pin = 34
@@ -51,33 +36,15 @@ OLED_HEIGHT = 32
 OLED_I2C_ADDR = 0x3C
 
 # ------------------ MOTOR PIN ASSIGNMENTS ------------------
-# Drive motors (these spin the wheels and actually move the robot)
-# Format per wheel: (dirA_pin, dirB_pin, pwm_pin)
-# Front Left drive motor (spins the FL wheel)
 FL_drive = (16, 17, 25)
-# Front Right drive motor (spins the FR wheel)
 FR_drive = (18, 19, 14)
-# Back Left drive motor (spins the BL wheel)
 BL_drive = (26, 27, 12)
-# Back Right drive motor (spins the BR wheel)
 BR_drive = (13, 15, 2)
 
-# Steering motors (these rotate the wheel modules to change heading; "rotate wheels in place")
-# Format per wheel: (dirA_pin, dirB_pin, pwm_pin)
-# Front Left steering motor (rotates the FL wheel assembly)
 FL_steer = (4, 5, 32)
-# Front Right steering motor (rotates the FR wheel assembly)
 FR_steer = (33, 34, 14)
-# Back Left steering motor (rotates the BL wheel assembly)
 BL_steer = (35, 36, 27)
-# Back Right steering motor (rotates the BR wheel assembly)
 BR_steer = (39, 37, 13)
-
-# NOTE: The example defaults above are illustrative. Be sure:
-# - Not to assign the same GPIO to more than one function.
-# - Use ADC1 pins for analog sensors (32..39) while Wi-Fi is on.
-# - Avoid using bootstrapping pins (0, 2, 12, 15) for outputs that could affect boot.
-# ---------------------------------------------------------------------
 
 # Wi-Fi AP credentials
 AP_SSID = "Mini-RC-SwerveDrive-AP"
@@ -92,27 +59,24 @@ control_state = {
 }
 control_lock = _thread.allocate_lock()
 
-# Utility functions
 def clamp(v, lo, hi):
     return lo if v < lo else (hi if v > hi else v)
 
 def map_range(val, a1, a2, b1, b2):
     return b1 + (float(val - a1) / (a2 - a1)) * (b2 - b1)
 
-# ---------- ADC setup (use only ADC1 pins while Wi-Fi AP active) ----------
 def make_adc(pin_no):
     if pin_no is None:
         return None
     try:
         adc = ADC(Pin(pin_no))
-        adc.atten(ADC.ATTN_11DB)   # full range ~3.3V
-        adc.width(ADC.WIDTH_12BIT)  # 0..4095
+        adc.atten(ADC.ATTN_11DB)
+        adc.width(ADC.WIDTH_12BIT)
         return adc
     except Exception as e:
         print("ADC init failed for pin", pin_no, ":", e)
         return None
 
-# Create ADC objects (use None if sensor pin not set)
 adc_FL_A = make_adc(FL_HeadingSensor_A_pin) if FL_HeadingSensor_A_pin is not None else None
 adc_FL_B = make_adc(FL_HeadingSensor_B_pin) if FL_HeadingSensor_B_pin is not None else None
 adc_FR_A = make_adc(FR_HeadingSensor_A_pin) if FR_HeadingSensor_A_pin is not None else None
@@ -125,11 +89,10 @@ adc_BR_B = make_adc(BR_HeadingSensor_B_pin) if BR_HeadingSensor_B_pin is not Non
 def read_analog_as_1023(adc):
     if adc is None:
         return 0
-    raw = adc.read()  # 0..4095
+    raw = adc.read()
     return int(raw * 1023 // 4095)
 
-# ---------- PWM & direction helpers for L298N ----------
-pwm_freq = 2000  # Hz for EN PWM (adjust as needed for motor driver)
+pwm_freq = 2000
 
 def make_pwm(pin_no):
     if pin_no is None:
@@ -146,7 +109,6 @@ def make_pwm(pin_no):
 def pwm_set_duty(pwm_obj, duty_val):
     if pwm_obj is None:
         return
-    # duty_val expected 0..1023
     try:
         pwm_obj.duty(int(duty_val))
     except Exception:
@@ -168,11 +130,9 @@ def set_drive_dir(forward, dirA_pin, dirB_pin):
     set_pin(dirB_pin, not forward)
 
 def set_steer_dir(cw, dirA_pin, dirB_pin):
-    # cw True => A HIGH, B LOW (adjust if your wiring reversed)
     set_pin(dirA_pin, 1 if cw else 0)
     set_pin(dirB_pin, 0 if cw else 1)
 
-# Initialize PWMs and store them in structured dicts
 def init_motor_struct(entry):
     dirA, dirB, pwm_pin = entry
     return {
@@ -201,7 +161,7 @@ def set_wheel_speed_struct(drive_struct, local_motor_speed):
     speed = int(local_motor_speed)
     if speed >= 0:
         set_drive_dir(True, dirA, dirB)
-        duty = min(1023, speed * 4)  # map 0..254 -> ~0..1016
+        duty = min(1023, speed * 4)
     else:
         set_drive_dir(False, dirA, dirB)
         duty = min(1023, (-speed) * 4)
@@ -212,14 +172,13 @@ def run_steer_motor_struct(steer_struct, local_motor_speed):
     dirA = steer_struct["dirA"]
     dirB = steer_struct["dirB"]
     if pwm_obj is None:
-        # If no separate steer PWM, you could toggle direction only, but here we skip
         return
     speed = int(local_motor_speed)
     if speed >= 0:
-        set_steer_dir(False, dirA, dirB)  # ccw
+        set_steer_dir(False, dirA, dirB)
         duty = min(1023, speed * 4)
     else:
-        set_steer_dir(True, dirA, dirB)  # cw
+        set_steer_dir(True, dirA, dirB)
         duty = min(1023, (-speed) * 4)
     pwm_set_duty(pwm_obj, duty)
 
@@ -233,12 +192,10 @@ def stop_all_steer():
         if s["pwm"] is not None:
             pwm_set_duty(s["pwm"], 0)
 
-# ---------- Heading calculation (ported from original) ----------
 def calculateHeading(sensorValueA0, sensorValueA1):
-    # sensorValueA0 / A1 expected 0..1023
     lowThreshold = 200
     highThreshold = 760
-    lineSlope = 0.342205323  # 350 degrees / 1023
+    lineSlope = 0.342205323
     lineIntercept = 169
     if (sensorValueA0 > lowThreshold) and (sensorValueA0 < highThreshold):
         sensorValueA0Component = lineSlope * sensorValueA0 - lineIntercept
@@ -280,7 +237,6 @@ def readCurrentHeading(adcA_obj, adcB_obj):
     corrected = add_wheel_offset_by_adc(adcA_obj, raw)
     return corrected
 
-# ---------- Web UI <-> control_state helpers ----------
 def web_axis_to_analog1023(x):
     return int((x + 1.0) * 511.5)
 
@@ -329,7 +285,6 @@ def DemoButtonPressed():
     finally:
         control_lock.release()
 
-# ---------- Convert joystick to desired wheel headings / speeds ----------
 def convert_right_joystick_to_heading_value(right_joystick_x_value):
     joystick_x_middle_value = 510
     joystick_deadzone = 5
@@ -342,9 +297,8 @@ def convert_right_joystick_to_heading_value(right_joystick_x_value):
 
 def set_wheel_heading_generic(steer_struct, desired_heading, current_heading):
     heading_alignment_tolerance = 20
-    base_speed = 130  # steering motor magnitude (0..254)
+    base_speed = 130
     heading_difference = desired_heading - current_heading
-    # normalize to -180..180
     if heading_difference > 180:
         heading_difference -= 360
     if heading_difference < -180:
@@ -355,11 +309,9 @@ def set_wheel_heading_generic(steer_struct, desired_heading, current_heading):
         steer_speed = int(base_speed if heading_difference < 0 else -base_speed)
     run_steer_motor_struct(steer_struct, steer_speed)
 
-# ---------- Homing routine ----------
 def driveMotorToHome(timeout_ms=10000):
     start = time.ticks_ms()
     while True:
-        # Read headings (use 0 when no sensors)
         FL_h = readCurrentHeading(adc_FL_A, adc_FL_B)
         FR_h = readCurrentHeading(adc_FR_A, adc_FR_B)
         BL_h = readCurrentHeading(adc_BL_A, adc_BL_B)
@@ -387,9 +339,7 @@ def driveMotorToHome(timeout_ms=10000):
             return False
         time.sleep_ms(50)
 
-# ---------- I2C / OLED / IMU initialization ----------
 i2c = I2C(scl=Pin(I2C_SCL_PIN), sda=Pin(I2C_SDA_PIN))
-# Detect and init OLED (ssd1306) if available
 oled = None
 try:
     import ssd1306
@@ -400,7 +350,6 @@ try:
 except Exception as e:
     oled = None
 
-# Attempt to detect MPU6050 (common 6/9DOF) at address 0x68
 imu_present = False
 imu_addr = None
 try:
@@ -408,7 +357,6 @@ try:
     if 0x68 in devices:
         imu_present = True
         imu_addr = 0x68
-        # quick WHO_AM_I read (MPU6050 register 0x75)
         try:
             who = i2c.readfrom_mem(imu_addr, 0x75, 1)
             if who and who[0] == 0x68:
@@ -416,12 +364,10 @@ try:
         except Exception:
             pass
     else:
-        # maybe other addresses exist; leave imu_present False
         pass
 except Exception as e:
     print("I2C scan failed:", e)
 
-# ---------- Web UI HTML ---------- (same simple UI as previous version)
 HTML_PAGE = """HTTP/1.0 200 OK
 
 <!doctype html>
@@ -429,7 +375,7 @@ HTML_PAGE = """HTTP/1.0 200 OK
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>Mini SwerveDrive</title>
-<style>body{font-family:Arial;margin:0;background:#111;color:#eee}.container{display:flex;flex-direction:column;align-items:center;padding:10px}.row{display:flex;width:100%;justify-content:space-around;margin:8px 0}.pad{width:45vw;height:45vw;max-width:360px;max-height:360px;background:#222;border-radius:12px;touch-action:none;position:relative;overflow:hidden}.knob{position:absolute;width:24px;height:24px;border-radius:12px;background:#09f;transform:translate(-50%,-50%);left:50%;top:50%}.btn{background:#333;color:#fff;padding:12px 20px;border-radius:8px;margin:6px;border:none;font-size:16px}.label{text-align:center;margin-top:6px}.small{font-size:12px;color:#aaa}</style>
+<style>body{{font-family:Arial;margin:0;background:#111;color:#eee}}.container{{display:flex;flex-direction:column;align-items:center;padding:10px}}.row{{display:flex;width:100%;justify-content:space-around;margin:8px 0}}.pad{{width:45vw;height:45vw;max-width:360px;max-height:360px;background:#222;border-radius:12px;touch-action:none;position:relative;overflow:hidden}}.knob{{position:absolute;width:24px;height:24px;border-radius:12px;background:#09f;transform:translate(-50%,-50%);left:50%;top:50%}}.btn{{background:#333;color:#fff;padding:12px 20px;border-radius:8px;margin:6px;border:none;font-size:16px}}.label{{text-align:center;margin-top:6px}}.small{{font-size:12px;color:#aaa}}</style>
 </head>
 <body>
 <div class="container">
@@ -448,14 +394,14 @@ HTML_PAGE = """HTTP/1.0 200 OK
 </div>
 <script>
 const updateIntervalMs = 60;
-function makePad(padId, knobId, stateKey) {
+function makePad(padId, knobId, stateKey) {{
   const pad = document.getElementById(padId);
   const knob = document.getElementById(knobId);
   let pointerId = null;
-  function updateKnob(nx, ny){ knob.style.left=(50+nx*50)+'%'; knob.style.top=(50-ny*50)+'%'; }
-  function down(e){ e.preventDefault(); pointerId = e.pointerId || 1; move(e); }
-  function up(e){ e.preventDefault(); pointerId=null; window[stateKey]={x:0,y:0}; updateKnob(0,0); }
-  function move(e){
+  function updateKnob(nx, ny){{ knob.style.left=(50+nx*50)+'%'; knob.style.top=(50-ny*50)+'%'; }}
+  function down(e){{ e.preventDefault(); pointerId = e.pointerId || 1; move(e); }}
+  function up(e){{ e.preventDefault(); pointerId=null; window[stateKey]={{x:0,y:0}}; updateKnob(0,0); }}
+  function move(e){{
     if(pointerId !== null && e.pointerId && e.pointerId !== pointerId) return;
     const r = pad.getBoundingClientRect();
     let px = e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX) || 0;
@@ -465,49 +411,47 @@ function makePad(padId, knobId, stateKey) {
     let nx = dx/maxR; if(nx>1) nx=1; if(nx<-1) nx=-1;
     let ny = dy/maxR; if(ny>1) ny=1; if(ny<-1) ny=-1;
     ny = -ny;
-    window[stateKey] = {x:nx,y:ny};
+    window[stateKey] = {{x:nx,y:ny}};
     updateKnob(nx,-ny);
-  }
+  }}
   pad.addEventListener('pointerdown', down);
   pad.addEventListener('pointermove', move);
   pad.addEventListener('pointerup', up);
   pad.addEventListener('pointercancel', up);
-  pad.addEventListener('touchstart', down, {passive:false});
-  pad.addEventListener('touchmove', move, {passive:false});
-  pad.addEventListener('touchend', up, {passive:false});
-  window[stateKey] = {x:0,y:0};
-}
+  pad.addEventListener('touchstart', down, {{passive:false}});
+  pad.addEventListener('touchmove', move, {{passive:false}});
+  pad.addEventListener('touchend', up, {{passive:false}});
+  window[stateKey] = {{x:0,y:0}};
+}}
 makePad('leftPad','leftKnob','leftState');
 makePad('rightPad','rightKnob','rightState');
 
-let buttons = {home:false, rotate:false, demo:false};
-document.getElementById('homeBtn').addEventListener('click', ()=>{ buttons.home = !buttons.home; document.getElementById('homeBtn').style.background = buttons.home ? '#0a0' : '#333'; });
-document.getElementById('rotateBtn').addEventListener('click', ()=>{ buttons.rotate = !buttons.rotate; document.getElementById('rotateBtn').style.background = buttons.rotate ? '#0a0' : '#333'; });
-document.getElementById('demoBtn').addEventListener('click', ()=>{ buttons.demo = !buttons.demo; document.getElementById('demoBtn').style.background = buttons.demo ? '#0a0' : '#333'; });
+let buttons = {{home:false, rotate:false, demo:false}};
+document.getElementById('homeBtn').addEventListener('click', ()=>{{ buttons.home = !buttons.home; document.getElementById('homeBtn').style.background = buttons.home ? '#0a0' : '#333'; }});
+document.getElementById('rotateBtn').addEventListener('click', ()=>{{ buttons.rotate = !buttons.rotate; document.getElementById('rotateBtn').style.background = buttons.rotate ? '#0a0' : '#333'; }});
+document.getElementById('demoBtn').addEventListener('click', ()=>{{ buttons.demo = !buttons.demo; document.getElementById('demoBtn').style.background = buttons.demo ? '#0a0' : '#333'; }});
 
-async function sendLoop(){
+async function sendLoop(){{
   const url = '/control';
-  while(true){
-    const payload = { left: window.leftState || {x:0,y:0}, right: window.rightState || {x:0,y:0}, buttons: buttons };
-    try {
+  while(true){{
+    const payload = {{ left: window.leftState || {{x:0,y:0}}, right: window.rightState || {{x:0,y:0}}, buttons: buttons }};
+    try {{
       if(navigator.sendBeacon) navigator.sendBeacon(url, JSON.stringify(payload));
-      else await fetch(url, {method:'POST', body: JSON.stringify(payload)});
-    } catch(e) { document.getElementById('status').innerText='Status: network error'; }
+      else await fetch(url, {{method:'POST', body: JSON.stringify(payload)}});
+    }} catch(e) {{ document.getElementById('status').innerText='Status: network error'; }}
     await new Promise(r=>setTimeout(r, updateIntervalMs));
-  }
-}
+  }}
+}}
 sendLoop();
 </script>
 </body>
 </html>
 """.format(ssid=AP_SSID, pw=AP_PASSWORD)
 
-# ---------- Start AP and HTTP server ----------
 def start_access_point():
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
     ap.config(essid=AP_SSID, authmode=network.AUTH_WPA_WPA2_PSK, password=AP_PASSWORD, channel=AP_CHANNEL)
-    # wait to become active
     for _ in range(50):
         if ap.active():
             break
@@ -546,7 +490,6 @@ def http_server_thread():
                 cl.close()
                 continue
             content_length = 0
-            # read headers
             while True:
                 header = cl_file.readline()
                 if not header or header == b'\r\n':
@@ -589,12 +532,10 @@ def http_server_thread():
                 pass
             time.sleep_ms(50)
 
-# ---------- Main control loop ----------
 normal_drive_mode = True
 rotate_drive_mode = False
 demonstration_mode = False
 
-# OLED updater
 def enable_periodic_oled_update(interval_ms=500):
     if not oled:
         return
@@ -620,13 +561,11 @@ def main_loop():
     joystick_deadzone = 5
     while True:
         enable_periodic_oled_update()
-        # Read current headings (zero if sensors not present)
         FL_h = readCurrentHeading(adc_FL_A, adc_FL_B) if (adc_FL_A and adc_FL_B) else 0.0
         FR_h = readCurrentHeading(adc_FR_A, adc_FR_B) if (adc_FR_A and adc_FR_B) else 0.0
         BL_h = readCurrentHeading(adc_BL_A, adc_BL_B) if (adc_BL_A and adc_BL_B) else 0.0
         BR_h = readCurrentHeading(adc_BR_A, adc_BR_B) if (adc_BR_A and adc_BR_B) else 0.0
 
-        # Drive speed from right joystick Y
         ry = get_right_joystick_y_control_value()
         if ry > (joystick_center + joystick_deadzone):
             motor_speed = int((ry - joystick_center) * (254.0 / (1023 - joystick_center)))
@@ -635,13 +574,11 @@ def main_loop():
         else:
             motor_speed = 0
 
-        # Apply same drive speed to all wheels for now (you can replace with swerve math)
         set_wheel_speed_struct(drive_FL, motor_speed)
         set_wheel_speed_struct(drive_FR, motor_speed)
         set_wheel_speed_struct(drive_BL, motor_speed)
         set_wheel_speed_struct(drive_BR, motor_speed)
 
-        # Steering based on mode
         if normal_drive_mode:
             rx = get_right_joystick_x_control_value()
             desired_heading = convert_right_joystick_to_heading_value(rx)
@@ -658,19 +595,16 @@ def main_loop():
                 rotate_speed = -int((joystick_center - lx) * (254.0 / joystick_center))
             else:
                 rotate_speed = 0
-            # fixed headings for rotate-in-place
             set_wheel_heading_generic(steer_FL, 45, FL_h)
             set_wheel_heading_generic(steer_FR, -45, FR_h)
             set_wheel_heading_generic(steer_BL, -45, BL_h)
             set_wheel_heading_generic(steer_BR, 45, BR_h)
-            # set wheel spin directions to rotate
             set_wheel_speed_struct(drive_FL, rotate_speed)
             set_wheel_speed_struct(drive_FR, -rotate_speed)
             set_wheel_speed_struct(drive_BL, rotate_speed)
             set_wheel_speed_struct(drive_BR, -rotate_speed)
 
         if demonstration_mode:
-            # simple demo: rotate steer motors and spin wheels briefly
             run_steer_motor_struct(steer_FL, 80)
             run_steer_motor_struct(steer_FR, 80)
             run_steer_motor_struct(steer_BL, -80)
@@ -685,12 +619,10 @@ def main_loop():
             demonstration_mode = False
             normal_drive_mode = True
 
-        # Buttons handling (web UI toggles)
         if LeftJoystickButtonPressed():
             print("Home pressed - starting homing")
             ok = driveMotorToHome(timeout_ms=8000)
             print("Homing done:", ok)
-            # Do not auto-clear web button (web UI toggles); user can toggle again
 
         if RightJoystickButtonPressed():
             rotate_drive_mode = not rotate_drive_mode
@@ -707,7 +639,6 @@ def main_loop():
 
         time.sleep_ms(30)
 
-# ---------- Startup ----------
 ap = start_access_point()
 _thread.start_new_thread(http_server_thread, ())
 
