@@ -416,9 +416,10 @@ function makePad(padId, knobId, stateKey) {{
     let maxR = Math.min(r.width, r.height)/2;
     let nx = dx/maxR; if(nx>1) nx=1; if(nx<-1) nx=-1;
     let ny = dy/maxR; if(ny>1) ny=1; if(ny<-1) ny=-1;
-    ny = -ny;
+    // FIXED: Remove inversion so up on screen = positive y
+    // old: ny = -ny;
     window[stateKey] = {{x:nx,y:ny}};
-    updateKnob(nx,-ny);
+    updateKnob(nx, ny); // ny not inverted for knob either
   }}
   pad.addEventListener('pointerdown', down);
   pad.addEventListener('pointermove', move);
