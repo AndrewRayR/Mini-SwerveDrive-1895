@@ -395,8 +395,8 @@ HTML_PAGE = """HTTP/1.0 200 OK
     <button id="rotateBtn" class="btn">Rotate</button>
     <button id="demoBtn" class="btn">Demo</button>
   </div>
-  <div class="label small">Connect to Wi-Fi: {ssid} (pw: {pw}) — open http://{apip}</div>
-  <div class="label small" id="status">Status: connected</div>
+  <div class="label small">Connected to Wi-Fi: {ssid} (Password: {pw})
+  <div class="label small" id="status">Status: Connected</div>
 </div>
 <script>
 const updateIntervalMs = 60;
