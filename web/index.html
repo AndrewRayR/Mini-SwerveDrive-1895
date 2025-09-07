@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Mini SwerveDrive</title>
+  <style>
+    body {
+      font-family: Arial;
+      margin: 0;
+      background: #111;
+      color: #eee
+    }
+
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 10px
+    }
+
+    .row {
+      display: flex;
+      width: 100%;
+      justify-content: space-around;
+      margin: 8px 0
+    }
+
+    .pad {
+      width: 45vw;
+      height: 45vw;
+      max-width: 360px;
+      max-height: 360px;
+      background: #222;
+      border-radius: 12px;
+      touch-action: none;
+      position: relative;
+      overflow: hidden;
+      border: 2px solid transparent;
+      transition: border-color 0.2s ease;
+    }
+
+    .pad.active {
+      border-color: #09f;
+    }
+
+    .pad.inactive {
+      border-color: #666;
+      opacity: 0.6;
+    }
+
+    .knob {
+      position: absolute;
+      width: 24px;
+      height: 24px;
+      border-radius: 12px;
+      background: #09f;
+      transform: translate(-50%, -50%);
+      left: 50%;
+      top: 50%
+    }
+
+    .btn {
+      background: #333;
+      color: #fff;
+      padding: 12px 20px;
+      border-radius: 8px;
+      margin: 6px;
+      border: none;
+      font-size: 16px
+    }
+
+    .label {
+      text-align: center;
+      margin-top: 6px
+    }
+
+    .small {
+      font-size: 12px;
+      color: #aaa
+    }
+
+    button.btn.active {
+      background: #0a0
+    }
+
+    h2 {
+      margin: 12px 0
+    }
+
+    #buttons {
+      margin-top: 2em;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h2>Mini SwerveDrive</h2>
+    <div class="row">
+      <div id="leftPad" class="pad">
+        <div id="leftKnob" class="knob"></div>
+      </div>
+      <div id="rightPad" class="pad">
+        <div id="rightKnob" class="knob"></div>
+      </div>
+    </div>
+    <div class="row" id="buttons">
+      <button id="homeBtn" class="btn">Home</button>
+      <button id="demoBtn" class="btn">Demo</button>
+    </div>
+    <div class="label small">Connected to Wi-Fi: __SSID__ (Password: __PASSWORD__)</div>
+    <div class="label small" id="status">Status: Connecting...</div>
+    <div class="label small" id="wsInfo">WebSocket: Initializing...</div>
+  </div>
+  <script>
+    // WebSocket connection
+    let ws = null;
+    let wsConnected = false;
+    let reconnectInterval = null;
+
+    // Global state for multi-touch management
+    let activePad = null; // 'left' or 'right' - tracks which pad is currently active
+    let joystickButtons = { left: false, right: false }; // Track joystick button presses
+
+    function connectWebSocket() {
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/`;
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = function (event) {
+          console.log('WebSocket connected');
+          wsConnected = true;
+          document.getElementById('status').innerText = 'Status: Connected via WebSocket';
+          document.getElementById('wsInfo').innerText = 'WebSocket: Connected';
+
+          // Clear reconnect interval if it exists
+          if (reconnectInterval) {
+            clearInterval(reconnectInterval);
+            reconnectInterval = null;
+          }
+
+          // Start sending control data
+          startSendLoop();
+        };
+
+        ws.onmessage = function (event) {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'status') {
+              // Handle status updates from server
+              const statusText = `Status: Connected (${data.connected_clients} clients) - Mode: ${data.mode}`;
+              document.getElementById('status').innerText = statusText;
+            }
+          } catch (e) {
+            console.error('Error parsing WebSocket message:', e);
+          }
+        };
+
+        ws.onclose = function (event) {
+          console.log('WebSocket disconnected');
+          wsConnected = false;
+          document.getElementById('status').innerText = 'Status: Disconnected - Reconnecting...';
+          document.getElementById('wsInfo').innerText = 'WebSocket: Disconnected';
+
+          // Attempt to reconnect
+          if (!reconnectInterval) {
+            reconnectInterval = setInterval(connectWebSocket, 2000);
+          }
+        };
+
+        ws.onerror = function (error) {
+          console.error('WebSocket error:', error);
+          document.getElementById('status').innerText = 'Status: Connection error';
+          document.getElementById('wsInfo').innerText = 'WebSocket: Error';
+        };
+
+      } catch (e) {
+        console.error('Error creating WebSocket:', e);
+        document.getElementById('status').innerText = 'Status: WebSocket not supported';
+        document.getElementById('wsInfo').innerText = 'WebSocket: Not supported';
+      }
+    }
+
+    function sendControlData(payload) {
+      if (ws && wsConnected && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify(payload));
+          return true;
+        } catch (e) {
+          console.error('Error sending WebSocket data:', e);
+          wsConnected = false;
+          return false;
+        }
+      }
+      return false;
+    }
+
+    function updatePadVisualStates() {
+      const leftPad = document.getElementById('leftPad');
+      const rightPad = document.getElementById('rightPad');
+
+      // Remove all state classes first
+      leftPad.classList.remove('active', 'inactive');
+      rightPad.classList.remove('active', 'inactive');
+
+      if (activePad === 'left') {
+        leftPad.classList.add('active');
+        rightPad.classList.add('inactive');
+      } else if (activePad === 'right') {
+        rightPad.classList.add('active');
+        leftPad.classList.add('inactive');
+      }
+      // When activePad is null, both pads are in their default state (no classes)
+    }
+
+    function makePad(padId, knobId, stateKey, padName) {
+      const pad = document.getElementById(padId);
+      const knob = document.getElementById(knobId);
+      let pointerId = null;
+
+      function updateKnob(nx, ny) {
+        knob.style.left = (50 + nx * 50) + '%';
+        knob.style.top = (50 - ny * 50) + '%';
+      }
+
+      function down(e) {
+        e.preventDefault();
+
+        // Set this pad as active and disable the other
+        activePad = padName;
+        updatePadVisualStates();
+
+        // Trigger joystick button press
+        joystickButtons[padName] = true;
+
+        pointerId = e.pointerId || 1;
+        move(e);
+      }
+
+      function up(e) {
+        e.preventDefault();
+
+        // Only handle up event if this pad is currently active
+        if (activePad !== padName) return;
+
+        pointerId = null;
+        activePad = null; // Clear active pad
+        updatePadVisualStates();
+        joystickButtons[padName] = false; // Clear button press
+        window[stateKey] = { x: 0, y: 0 };
+        updateKnob(0, 0);
+      }
+
+      function move(e) {
+        // Only handle move events if this pad is active
+        if (activePad !== padName) return;
+        if (pointerId !== null && e.pointerId && e.pointerId !== pointerId) return;
+
+        const r = pad.getBoundingClientRect();
+        let px = e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX) || 0;
+        let py = e.clientY || (e.touches && e.touches[0] && e.touches[0].clientY) || 0;
+        let dx = px - (r.left + r.width / 2), dy = py - (r.top + r.height / 2);
+        let maxR = Math.min(r.width, r.height) / 2;
+        let nx = dx / maxR; if (nx > 1) nx = 1; if (nx < -1) nx = -1;
+        let ny = dy / maxR; if (ny > 1) ny = 1; if (ny < -1) ny = -1;
+        // Invert ny so up = +1, down = -1, and knob moves up when you move up
+        ny = -ny;
+        window[stateKey] = { x: nx, y: ny };
+        updateKnob(nx, ny);
+      }
+
+      pad.addEventListener('pointerdown', down);
+      pad.addEventListener('pointermove', move);
+      pad.addEventListener('pointerup', up);
+      pad.addEventListener('pointercancel', up);
+      pad.addEventListener('touchstart', down, { passive: false });
+      pad.addEventListener('touchmove', move, { passive: false });
+      pad.addEventListener('touchend', up, { passive: false });
+      window[stateKey] = { x: 0, y: 0 };
+    }
+
+    makePad('leftPad', 'leftKnob', 'leftState', 'left');
+    makePad('rightPad', 'rightKnob', 'rightState', 'right');
+
+    let buttons = { home: false, rotate: false, demo: false };
+    function toggle(btn, key) {
+      buttons[key] = !buttons[key];
+    }
+    document.getElementById('homeBtn').addEventListener('click', () => toggle(document.getElementById('homeBtn'), 'home'));
+    document.getElementById('demoBtn').addEventListener('click', () => toggle(document.getElementById('demoBtn'), 'demo'));
+
+    let sendTimer = null;
+    const updateIntervalMs = 100; // Faster updates with WebSocket
+
+    async function sendLoop() {
+      // Combine regular buttons with joystick button presses
+      const allButtons = {
+        ...buttons,
+        leftJoystick: joystickButtons.left,
+        rightJoystick: joystickButtons.right
+      };
+
+      const payload = {
+        left: window.leftState || { x: 0, y: 0 },
+        right: window.rightState || { x: 0, y: 0 },
+        buttons: allButtons
+      };
+
+      // Reset momentary buttons
+      buttons["home"] = false;
+      buttons["demo"] = false;
+
+      // Send via WebSocket
+      const success = sendControlData(payload);
+
+      if (!success && wsConnected) {
+        document.getElementById('status').innerText = 'Status: Send error - Reconnecting...';
+      }
+
+      if (sendTimer) clearTimeout(sendTimer);
+      sendTimer = setTimeout(sendLoop, updateIntervalMs);
+    }
+
+    function startSendLoop() {
+      if (sendTimer) clearTimeout(sendTimer);
+      sendTimer = setTimeout(sendLoop, updateIntervalMs);
+    }
+
+    function stopSendLoop() {
+      if (sendTimer) { clearTimeout(sendTimer); sendTimer = null; }
+    }
+
+    // Initialize WebSocket connection
+    connectWebSocket();
+  </script>
+</body>
+
+</html>

@@ -16,6 +16,9 @@ import _thread
 import time
 import ujson
 import machine
+import hashlib
+import binascii
+import struct
 from machine import Pin, ADC, PWM, I2C
 
 # ---------- PIN MAP (EDIT BEFORE USE) ----------
@@ -61,9 +64,18 @@ AP_DNS       = '8.8.8.8'
 control_state = {
     "left": {"x": 0.0, "y": 0.0},
     "right": {"x": 0.0, "y": 0.0},
-    "buttons": {"home": False, "rotate": False, "demo": False}
+    "buttons": {"home": False, "rotate": False, "demo": False, "leftJoystick": False, "rightJoystick": False}
 }
 control_lock = _thread.allocate_lock()
+
+# WebSocket globals
+websocket_clients = []
+network_polling_delay = 30 # ms between polling events
+
+ws_clients_lock = _thread.allocate_lock()
+
+# WebSocket magic string for handshake
+WS_MAGIC_STRING = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 def clamp(v, lo, hi):
     return lo if v < lo else (hi if v > hi else v)
@@ -270,27 +282,6 @@ def get_left_joystick_x_control_value():
         control_lock.release()
     return web_axis_to_analog1023(v)
 
-def LeftJoystickButtonPressed():
-    control_lock.acquire()
-    try:
-        return bool(control_state['buttons']['home'])
-    finally:
-        control_lock.release()
-
-def RightJoystickButtonPressed():
-    control_lock.acquire()
-    try:
-        return bool(control_state['buttons']['rotate'])
-    finally:
-        control_lock.release()
-
-def DemoButtonPressed():
-    control_lock.acquire()
-    try:
-        return bool(control_state['buttons']['demo'])
-    finally:
-        control_lock.release()
-
 def convert_right_joystick_to_heading_value(right_joystick_x_value):
     joystick_x_middle_value = 510
     joystick_deadzone = 5
@@ -374,86 +365,23 @@ try:
 except Exception as e:
     print("I2C scan failed:", e)
 
-HTML_PAGE = """HTTP/1.0 200 OK
-
-<!doctype html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>Mini SwerveDrive</title>
-<style>body{{font-family:Arial;margin:0;background:#111;color:#eee}}.container{{display:flex;flex-direction:column;align-items:center;padding:10px}}.row{{display:flex;width:100%;justify-content:space-around;margin:8px 0}}.pad{{width:45vw;height:45vw;max-width:360px;max-height:360px;background:#222;border-radius:12px;touch-action:none;position:relative;overflow:hidden}}.knob{{position:absolute;width:24px;height:24px;border-radius:12px;background:#09f;transform:translate(-50%,-50%);left:50%;top:50%}}.btn{{background:#333;color:#fff;padding:12px 20px;border-radius:8px;margin:6px;border:none;font-size:16px}}.label{{text-align:center;margin-top:6px}}.small{{font-size:12px;color:#aaa}}</style>
-</head>
-<body>
-<div class="container">
-  <h2>Mini SwerveDrive</h2>
-  <div class="row">
-    <div id="leftPad" class="pad"><div id="leftKnob" class="knob"></div></div>
-    <div id="rightPad" class="pad"><div id="rightKnob" class="knob"></div></div>
-  </div>
-  <div class="row">
-    <button id="homeBtn" class="btn">Home</button>
-    <button id="rotateBtn" class="btn">Rotate</button>
-    <button id="demoBtn" class="btn">Demo</button>
-  </div>
-  <div class="label small">Connected to Wi-Fi: {ssid} (Password: {pw})
-  <div class="label small" id="status">Status: Connected</div>
-</div>
-<script>
-const updateIntervalMs = 60;
-function makePad(padId, knobId, stateKey) {{
-  const pad = document.getElementById(padId);
-  const knob = document.getElementById(knobId);
-  let pointerId = null;
-  function updateKnob(nx, ny){{ knob.style.left=(50+nx*50)+'%'; knob.style.top=(50-ny*50)+'%'; }}
-  function down(e){{ e.preventDefault(); pointerId = e.pointerId || 1; move(e); }}
-  function up(e){{ e.preventDefault(); pointerId=null; window[stateKey]={{x:0,y:0}}; updateKnob(0,0); }}
-  function move(e){{
-    if(pointerId !== null && e.pointerId && e.pointerId !== pointerId) return;
-    const r = pad.getBoundingClientRect();
-    let px = e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX) || 0;
-    let py = e.clientY || (e.touches && e.touches[0] && e.touches[0].clientY) || 0;
-    let dx = px - (r.left + r.width/2), dy = py - (r.top + r.height/2);
-    let maxR = Math.min(r.width, r.height)/2;
-    let nx = dx/maxR; if(nx>1) nx=1; if(nx<-1) nx=-1;
-    let ny = dy/maxR; if(ny>1) ny=1; if(ny<-1) ny=-1;
-    // FIXED: Invert ny so up = +1, down = -1, and knob moves up when you move up
-    ny = -ny;
-    window[stateKey] = {{x:nx,y:ny}};
-    updateKnob(nx, ny);
-  }}
-  pad.addEventListener('pointerdown', down);
-  pad.addEventListener('pointermove', move);
-  pad.addEventListener('pointerup', up);
-  pad.addEventListener('pointercancel', up);
-  pad.addEventListener('touchstart', down, {{passive:false}});
-  pad.addEventListener('touchmove', move, {{passive:false}});
-  pad.addEventListener('touchend', up, {{passive:false}});
-  window[stateKey] = {{x:0,y:0}};
-}}
-makePad('leftPad','leftKnob','leftState');
-makePad('rightPad','rightKnob','rightState');
-
-let buttons = {{home:false, rotate:false, demo:false}};
-document.getElementById('homeBtn').addEventListener('click', ()=>{{ buttons.home = !buttons.home; document.getElementById('homeBtn').style.background = buttons.home ? '#0a0' : '#333'; }});
-document.getElementById('rotateBtn').addEventListener('click', ()=>{{ buttons.rotate = !buttons.rotate; document.getElementById('rotateBtn').style.background = buttons.rotate ? '#0a0' : '#333'; }});
-document.getElementById('demoBtn').addEventListener('click', ()=>{{ buttons.demo = !buttons.demo; document.getElementById('demoBtn').style.background = buttons.demo ? '#0a0' : '#333'; }});
-
-async function sendLoop(){{
-  const url = '/control';
-  while(true){{
-    const payload = {{ left: window.leftState || {{x:0,y:0}}, right: window.rightState || {{x:0,y:0}}, buttons: buttons }};
-    try {{
-      if(navigator.sendBeacon) navigator.sendBeacon(url, JSON.stringify(payload));
-      else await fetch(url, {{method:'POST', body: JSON.stringify(payload)}});
-    }} catch(e) {{ document.getElementById('status').innerText='Status: network error'; }}
-    await new Promise(r=>setTimeout(r, updateIntervalMs));
-  }}
-}}
-sendLoop();
-</script>
-</body>
-</html>
-""".format(ssid=AP_SSID, pw=AP_PASSWORD, apip=AP_STATIC_IP)
+def load_html_page():
+    paths = ('web/index.html', '/web/index.html')
+    html = None
+    for p in paths:
+        try:
+            with open(p, 'r') as f:
+                html = f.read()
+                break
+        except Exception:
+            pass
+    if html is None:
+        body = "<html><body><h3>Mini SwerveDrive</h3><p>UI file missing.</p></body></html>"
+        return "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" + body
+    # Inject runtime values
+    html = html.replace('__SSID__', AP_SSID)
+    html = html.replace('__PASSWORD__', AP_PASSWORD)
+    return "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" + html
 
 def start_access_point():
     ap = network.WLAN(network.AP_IF)
@@ -477,13 +405,129 @@ def start_access_point():
             pass
     return ap
 
+def websocket_hash(key):
+    """Generate WebSocket accept key"""
+    combined = key + WS_MAGIC_STRING
+    sha1 = hashlib.sha1(combined.encode()).digest()
+    return binascii.b2a_base64(sha1).decode().strip()
+
+def send_websocket_frame(client, data):
+    """Send WebSocket frame to client"""
+    try:
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+        
+        length = len(data)
+        if length < 126:
+            header = struct.pack('!BB', 0x81, length)
+        elif length < 65536:
+            header = struct.pack('!BBH', 0x81, 126, length)
+        else:
+            header = struct.pack('!BBQ', 0x81, 127, length)
+        
+        client.send(header + data)
+        return True
+    except Exception as e:
+        print("WebSocket send error:", e)
+        return False
+
+def parse_websocket_frame(data):
+    """Parse incoming WebSocket frame"""
+    if len(data) < 2:
+        return None
+    
+    byte1, byte2 = struct.unpack('!BB', data[:2])
+    opcode = byte1 & 0x0F
+    masked = bool(byte2 & 0x80)
+    payload_length = byte2 & 0x7F
+    
+    header_length = 2
+    if payload_length == 126:
+        if len(data) < 4:
+            return None
+        payload_length = struct.unpack('!H', data[2:4])[0]
+        header_length = 4
+    elif payload_length == 127:
+        if len(data) < 10:
+            return None
+        payload_length = struct.unpack('!Q', data[2:10])[0]
+        header_length = 10
+    
+    if masked:
+        if len(data) < header_length + 4:
+            return None
+        mask = data[header_length:header_length+4]
+        header_length += 4
+    
+    if len(data) < header_length + payload_length:
+        return None
+    
+    payload = data[header_length:header_length+payload_length]
+    
+    if masked:
+        payload = bytes(payload[i] ^ mask[i % 4] for i in range(len(payload)))
+    
+    result = payload.decode('utf-8') if opcode == 1 else payload
+
+    return result
+
+def handle_websocket_client(client):
+    """Handle WebSocket client in separate thread"""
+    try:
+        while True:
+            try:
+                data = client.recv(1024)
+                if not data:
+                    break
+                
+                message = parse_websocket_frame(data)
+                if message:
+                    try:
+                        control_data = ujson.loads(message)
+                        control_lock.acquire()
+                        try:
+                            if 'left' in control_data:
+                                control_state['left']['x'] = float(control_data['left'].get('x', 0.0))
+                                control_state['left']['y'] = float(control_data['left'].get('y', 0.0))
+                            if 'right' in control_data:
+                                control_state['right']['x'] = float(control_data['right'].get('x', 0.0))
+                                control_state['right']['y'] = float(control_data['right'].get('y', 0.0))
+                            if 'buttons' in control_data:
+                                for b in ('home', 'rotate', 'demo', 'leftJoystick', 'rightJoystick'):
+                                    control_state['buttons'][b] = bool(control_data['buttons'].get(b, False))
+                        finally:
+                            control_lock.release()
+                    except Exception as e:
+                        print("JSON parse error:", e)
+            except Exception as e:
+                print("WebSocket receive error:", e)
+                break
+            
+            time.sleep_ms(websocket_polling_delay)
+    except Exception as e:
+        print("WebSocket client error:", e)
+    finally:
+        # Remove client from list
+        ws_clients_lock.acquire()
+        try:
+            if client in websocket_clients:
+                websocket_clients.remove(client)
+        finally:
+            ws_clients_lock.release()
+        try:
+            client.close()
+        except:
+            pass
+        print("WebSocket client disconnected")
+
 def http_server_thread():
     addr = socket.getaddrinfo('0.0.0.0', 80)[0][-1]
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(addr)
     s.listen(1)
-    print("HTTP server listening on", addr)
+    print("HTTP/WebSocket server listening on", addr)
+    
     while True:
         try:
             cl, addr = s.accept()
@@ -492,58 +536,102 @@ def http_server_thread():
             if not request_line:
                 cl.close()
                 continue
+            
             try:
                 request = request_line.decode()
                 method, path, _ = request.split()[:3]
             except Exception:
                 cl.close()
                 continue
-            content_length = 0
+            
+            # Parse headers
+            headers = {}
             while True:
                 header = cl_file.readline()
                 if not header or header == b'\r\n':
                     break
                 try:
-                    h = header.decode()
-                    if 'Content-Length:' in h:
-                        content_length = int(h.split(':')[1].strip())
+                    h = header.decode().strip()
+                    if ':' in h:
+                        key, value = h.split(':', 1)
+                        headers[key.strip().lower()] = value.strip()
                 except Exception:
                     pass
-            if method == 'GET':
-                cl.send(HTML_PAGE.encode('utf-8'))
-            elif method == 'POST' and path.startswith('/control'):
-                body = cl_file.read(content_length) if content_length else b''
-                try:
-                    data = ujson.loads(body)
-                    control_lock.acquire()
+            
+            # Handle WebSocket upgrade
+            if (headers.get('upgrade', '').lower() == 'websocket' and 
+                headers.get('connection', '').lower() == 'upgrade'):
+                
+                ws_key = headers.get('sec-websocket-key')
+                if ws_key:
+                    accept_key = websocket_hash(ws_key)
+                    response = (
+                        "HTTP/1.1 101 Switching Protocols\r\n"
+                        "Upgrade: websocket\r\n"
+                        "Connection: Upgrade\r\n"
+                        f"Sec-WebSocket-Accept: {accept_key}\r\n"
+                        "\r\n"
+                    )
+                    cl.send(response.encode())
+                    
+                    # Add client to WebSocket clients list
+                    ws_clients_lock.acquire()
                     try:
-                        if 'left' in data:
-                            control_state['left']['x'] = float(data['left'].get('x', 0.0))
-                            control_state['left']['y'] = float(data['left'].get('y', 0.0))
-                        if 'right' in data:
-                            control_state['right']['x'] = float(data['right'].get('x', 0.0))
-                            control_state['right']['y'] = float(data['right'].get('y', 0.0))
-                        if 'buttons' in data:
-                            for b in ('home', 'rotate', 'demo'):
-                                control_state['buttons'][b] = bool(data['buttons'].get(b, False))
+                        websocket_clients.append(cl)
                     finally:
-                        control_lock.release()
-                    cl.send("HTTP/1.0 200 OK\r\n\r\nOK")
-                except Exception:
-                    cl.send("HTTP/1.0 400 Bad Request\r\n\r\n")
+                        ws_clients_lock.release()
+                    
+                    print("WebSocket client connected")
+                    # Handle WebSocket client in new thread
+                    _thread.start_new_thread(handle_websocket_client, (cl,))
+                    continue
+                else:
+                    cl.send("HTTP/1.0 400 Bad Request\r\n\r\n".encode())
+            
+            # Handle regular HTTP requests
+            elif method == 'GET':
+                cl.send(load_html_page().encode('utf-8'))
+                cl.close()
             else:
-                cl.send("HTTP/1.0 404 Not Found\r\n\r\n")
-            cl.close()
+                cl.send("HTTP/1.0 404 Not Found\r\n\r\n".encode())
+                cl.close()
+                
         except Exception as e:
+            print("Server error:", e)
             try:
                 cl.close()
             except:
                 pass
-            time.sleep_ms(50)
+            time.sleep_ms(websocket_polling_delay)
 
 normal_drive_mode = True
 rotate_drive_mode = False
 demonstration_mode = False
+
+def send_status_to_clients(status_data):
+    """Send status update to all connected WebSocket clients"""
+    ws_clients_lock.acquire()
+    try:
+        clients_to_remove = []
+        for client in websocket_clients[:]:  # Create a copy to iterate over
+            try:
+                message = ujson.dumps(status_data)
+                if not send_websocket_frame(client, message):
+                    clients_to_remove.append(client)
+            except Exception as e:
+                print(f"Error sending to client: {e}")
+                clients_to_remove.append(client)
+        
+        # Remove failed clients
+        for client in clients_to_remove:
+            if client in websocket_clients:
+                websocket_clients.remove(client)
+            try:
+                client.close()
+            except:
+                pass
+    finally:
+        ws_clients_lock.release()
 
 def enable_periodic_oled_update(interval_ms=500):
     if not oled:
@@ -563,11 +651,33 @@ def enable_periodic_oled_update(interval_ms=500):
             oled.show()
         except Exception:
             pass
+        
+        # Send status update to WebSocket clients
+        try:
+            status_data = {
+                "type": "status",
+                "mode": "ROT" if rotate_drive_mode else ("DEMO" if demonstration_mode else "NORM"),
+                "joystick": {"right_x": rx, "right_y": ry},
+                "connected_clients": len(websocket_clients)
+            }
+            send_status_to_clients(status_data)
+        except Exception:
+            pass
 
 def main_loop():
     global normal_drive_mode, rotate_drive_mode, demonstration_mode
     joystick_center = 510
     joystick_deadzone = 5
+    last_log_time = time.ticks_ms()
+    log_interval = 2000  # 2000ms = 2 seconds
+    
+    # Initialize button state tracking
+    home_button_last_state = False
+    rotate_button_last_state = False
+    demo_button_last_state = False
+    left_joystick_button_last_state = False
+    right_joystick_button_last_state = False
+    
     while True:
         enable_periodic_oled_update()
         FL_h = readCurrentHeading(adc_FL_A, adc_FL_B) if (adc_FL_A and adc_FL_B) else 0.0
@@ -587,6 +697,10 @@ def main_loop():
         set_wheel_speed_struct(drive_FR, motor_speed)
         set_wheel_speed_struct(drive_BL, motor_speed)
         set_wheel_speed_struct(drive_BR, motor_speed)
+
+        # Initialize variables for logging
+        desired_heading = 0.0
+        rotate_speed = 0
 
         if normal_drive_mode:
             rx = get_right_joystick_x_control_value()
@@ -613,6 +727,16 @@ def main_loop():
             set_wheel_speed_struct(drive_BL, rotate_speed)
             set_wheel_speed_struct(drive_BR, -rotate_speed)
 
+        # Console logging for monitoring variables (every 2 seconds)
+        current_time = time.ticks_ms()
+        if time.ticks_diff(current_time, last_log_time) >= log_interval:
+            last_log_time = current_time
+            print("--- Main Loop Monitor ---")
+            print("motor_speed: {}, desired_heading: {:.2f}".format(motor_speed, desired_heading))
+            print("drive_FL: {}, drive_FR: {}, drive_BL: {}, drive_BR: {}".format(motor_speed, motor_speed, motor_speed, motor_speed))
+            print("steer_FL: {:.2f}, steer_FR: {:.2f}, steer_BL: {:.2f}, steer_BR: {:.2f}".format(FL_h, FR_h, BL_h, BR_h))
+            print("rotate_speed: {}, demonstration_mode: {}".format(rotate_speed, demonstration_mode))
+
         if demonstration_mode:
             run_steer_motor_struct(steer_FL, 80)
             run_steer_motor_struct(steer_FR, 80)
@@ -628,23 +752,37 @@ def main_loop():
             demonstration_mode = False
             normal_drive_mode = True
 
-        if LeftJoystickButtonPressed():
+        home_button_current = control_state['buttons']['home']
+        if home_button_current and not home_button_last_state:
             print("Home pressed - starting homing")
             ok = driveMotorToHome(timeout_ms=8000)
             print("Homing done:", ok)
+        home_button_last_state = home_button_current
 
-        if RightJoystickButtonPressed():
+        left_joystick_button_current = control_state['buttons']['leftJoystick']
+        if left_joystick_button_current and not left_joystick_button_last_state:
+            print("Left joystick button pressed")
+        left_joystick_button_last_state = left_joystick_button_current
+
+        right_joystick_button_current = control_state['buttons']['rightJoystick']
+        if right_joystick_button_current and not right_joystick_button_last_state:
+            print("Right joystick button pressed")
+        right_joystick_button_last_state = right_joystick_button_current
+
+        rotate_button_current = control_state['buttons']['rotate']
+        if rotate_button_current and not rotate_button_last_state:
             rotate_drive_mode = not rotate_drive_mode
             normal_drive_mode = not rotate_drive_mode
             print("Rotate mode is now", rotate_drive_mode)
-            time.sleep_ms(300)
+        rotate_button_last_state = rotate_button_current
 
-        if DemoButtonPressed():
+        demo_button_current = control_state['buttons']['demo']
+        if demo_button_current and not demo_button_last_state:
             demonstration_mode = True
             normal_drive_mode = False
             rotate_drive_mode = False
             print("Demo started")
-            time.sleep_ms(300)
+        demo_button_last_state = demo_button_current
 
         time.sleep_ms(30)
 
