@@ -51,6 +51,12 @@ AP_SSID = "Mini-RC-SwerveDrive-AP"
 AP_PASSWORD = "FRC_TEAM1895"
 AP_CHANNEL = 6
 
+# ----------- Static IP configuration for AP -------------
+AP_STATIC_IP = '192.168.10.1'
+AP_NETMASK   = '255.255.255.0'
+AP_GATEWAY   = '192.168.10.1'
+AP_DNS       = '8.8.8.8'
+
 # Global control state updated by web UI
 control_state = {
     "left": {"x": 0.0, "y": 0.0},
@@ -389,7 +395,7 @@ HTML_PAGE = """HTTP/1.0 200 OK
     <button id="rotateBtn" class="btn">Rotate</button>
     <button id="demoBtn" class="btn">Demo</button>
   </div>
-  <div class="label small">Connect to Wi-Fi: {ssid} (pw: {pw}) — open http://192.168.4.1</div>
+  <div class="label small">Connect to Wi-Fi: {ssid} (pw: {pw}) — open http://{apip}</div>
   <div class="label small" id="status">Status: connected</div>
 </div>
 <script>
@@ -446,12 +452,14 @@ sendLoop();
 </script>
 </body>
 </html>
-""".format(ssid=AP_SSID, pw=AP_PASSWORD)
+""".format(ssid=AP_SSID, pw=AP_PASSWORD, apip=AP_STATIC_IP)
 
 def start_access_point():
     ap = network.WLAN(network.AP_IF)
     ap.active(True)
     ap.config(essid=AP_SSID, authmode=network.AUTH_WPA_WPA2_PSK, password=AP_PASSWORD, channel=AP_CHANNEL)
+    # ---- Set static IP address ----
+    ap.ifconfig((AP_STATIC_IP, AP_NETMASK, AP_GATEWAY, AP_DNS))
     for _ in range(50):
         if ap.active():
             break
